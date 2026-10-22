@@ -1,30 +1,30 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, make_response
+from threading import Lock
 import os
 import time
-import math
 
 app = Flask(__name__)
 app.json.ensure_ascii = False
 
-UPDATE_INTERVAL = 30
+# FICTIONAL TEST DATA — not official election results.
 TOTAL_ELECTORS = 100_000
 SIMULATION_DURATION = 300  # 5 minutes
-# Starts automatically when Render launches the Python server.
-# Note: a restart or sleeping/waking service may reset this test simulation.
-SIMULATION_START = int(time.time())
-
-# Fixed cumulative vote distribution. No randomness means no vote totals can fall.
-# These are invented test values, not real results.
+SIMULATION_START = time.time()  # No Unix timestamp to enter
 FINAL_ABSTENTIONS = 18_000
 FINAL_BLANK = 1_640
 FINAL_NULL = 2_460
-FINAL_VALID = TOTAL_ELECTORS - FINAL_ABSTENTIONS - FINAL_BLANK - FINAL_NULL
 FINAL_LULA = 40_000
-FINAL_FLAVIO = FINAL_VALID - FINAL_LULA
+FINAL_FLAVIO = TOTAL_ELECTORS - FINAL_ABSTENTIONS - FINAL_BLANK - FINAL_NULL - FINAL_LULA
+FINAL_TOTAL_VOTES = TOTAL_ELECTORS - FINAL_ABSTENTIONS
+
+# One process is required to keep this in-memory state consistent.
+lock = Lock()
+request_number = 0
+last_total_votes = 0
 
 
-def cumulative(final_value, step, total_steps):
-    return (final_value * step) // total_steps
+def portion(final_amount, counted):
+    return final_amount * counted // FINAL_TOTAL_VOTES
 
 
 @app.get("/")
@@ -34,38 +34,48 @@ def home():
 
 @app.get("/results")
 def results():
-    now = int(time.time())
-    total_steps = math.ceil(SIMULATION_DURATION / UPDATE_INTERVAL)
-    elapsed = max(0, now - SIMULATION_START)
-    step = min(total_steps, elapsed // UPDATE_INTERVAL)
+    global request_number, last_total_votes
+    with lock:
+        now = time.time()
+        elapsed = max(0.0, now - SIMULATION_START)
+        # Time moves the count forward; each GET adds at least one vote until complete.
+        time_based_votes = int(FINAL_TOTAL_VOTES * min(elapsed / SIMULATION_DURATION, 1.0))
+        last_total_votes = min(FINAL_TOTAL_VOTES, max(time_based_votes, last_total_votes + 1))
+        request_number += 1
+        total_votes = last_total_votes
+        number = request_number
 
-    lula_votes = cumulative(FINAL_LULA, step, total_steps)
-    flavio_votes = cumulative(FINAL_FLAVIO, step, total_steps)
-    blank_votes = cumulative(FINAL_BLANK, step, total_steps)
-    null_votes = cumulative(FINAL_NULL, step, total_steps)
+    lula_votes = portion(FINAL_LULA, total_votes)
+    flavio_votes = portion(FINAL_FLAVIO, total_votes)
+    blank_votes = portion(FINAL_BLANK, total_votes)
+    null_votes = total_votes - lula_votes - flavio_votes - blank_votes
     valid_votes = lula_votes + flavio_votes
-    total_votes = valid_votes + blank_votes + null_votes
-    # Abstentions cannot be determined during partial counting; this is a
-    # simulated final estimate and stays constant throughout the test.
-    abstentions = FINAL_ABSTENTIONS
 
-    return jsonify({
+    payload = {
         "simulation": True,
-        "lastUpdated": SIMULATION_START + step * UPDATE_INTERVAL if step else SIMULATION_START,
-        "updateInterval": UPDATE_INTERVAL,
+        "notice": "DADOS FICTÍCIOS — SIMULAÇÃO, NÃO SÃO RESULTADOS DO TSE",
+        "requestNumber": number,
+        "lastUpdated": int(now),
+        "updateInterval": 0,
+        "simulationDuration": SIMULATION_DURATION,
         "totalElectors": TOTAL_ELECTORS,
         "totalVotes": total_votes,
         "validVotes": valid_votes,
         "blankVotes": blank_votes,
         "nullVotes": null_votes,
-        "abstentions": abstentions,
+        "abstentions": FINAL_ABSTENTIONS,
         "turnout": round(total_votes / TOTAL_ELECTORS * 100, 2),
-        "countedPercentage": round(step / total_steps * 100, 2),
+        "countedPercentage": round(total_votes / FINAL_TOTAL_VOTES * 100, 2),
         "candidates": [
-            {"name": "Lula", "votes": lula_votes, "percentage": round(lula_votes / valid_votes * 100, 2) if valid_votes else 0},
-            {"name": "Flávio Bolsonaro", "votes": flavio_votes, "percentage": round(flavio_votes / valid_votes * 100, 2) if valid_votes else 0}
-        ]
-    })
+            {"name": "Lula", "votes": lula_votes,
+             "percentage": round(lula_votes / valid_votes * 100, 2) if valid_votes else 0},
+            {"name": "Flávio Bolsonaro", "votes": flavio_votes,
+             "percentage": round(flavio_votes / valid_votes * 100, 2) if valid_votes else 0},
+        ],
+    }
+    response = make_response(jsonify(payload))
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return response
 
 
 if __name__ == "__main__":
